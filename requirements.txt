@@ -1,0 +1,13 @@
+streamlit
+pandas
+openpyxl
+python-dotenv
+langgraph
+openai
+azure-ai-documentintelligence
+camelot-py[cv]
+pypdf
+PyMuPDF
+pydantic
+langchain-openai
+langchain-core
