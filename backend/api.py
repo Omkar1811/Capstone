@@ -44,10 +44,47 @@ app.add_middleware(
 UPLOAD_DIR  = Path("uploads")
 RESULTS_DIR = Path("results")
 COMPARE_DIR = Path("compare")
-CSV_PATH    = Path("retail.csv")
+
+# Persisted CSV path — written on every upload so it survives server restarts.
+_CSV_PATH_FILE = UPLOAD_DIR / ".csv_path"
 
 for d in [UPLOAD_DIR, RESULTS_DIR, COMPARE_DIR]:
     d.mkdir(exist_ok=True)
+
+# ── CSV path resolution ────────────────────────────────────────────────────────
+# Priority on startup / after restart:
+#   1. Path persisted in uploads/.csv_path  (set on last successful upload)
+#   2. retail.csv / retail.xlsx in project root  (committed to git)
+#   3. Any *.xlsx / *.csv found in UPLOAD_DIR or project root
+
+def _resolve_csv_path() -> Path:
+    """Return the best available reference CSV/Excel path."""
+    # 1. Persisted path from previous upload
+    if _CSV_PATH_FILE.exists():
+        try:
+            p = Path(_CSV_PATH_FILE.read_text(encoding="utf-8").strip())
+            if p.exists():
+                return p
+        except Exception:
+            pass
+
+    # 2. Well-known default filenames in the project root
+    for name in ("retail.xlsx", "retail.csv", "invoice.xlsx"):
+        p = Path(name)
+        if p.exists():
+            return p
+
+    # 3. Any Excel / CSV file in uploads/ or project root
+    for directory in [UPLOAD_DIR, Path(".")]:
+        for pattern in ("*.xlsx", "*.xls", "*.xlsm", "*.csv"):
+            for f in sorted(directory.glob(pattern)):
+                if not f.name.startswith("."):
+                    return f
+
+    return Path("retail.csv")   # fallback (may not exist; _load_csv handles None)
+
+
+CSV_PATH: Path = _resolve_csv_path()
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -62,6 +99,10 @@ def _find_pdf(po: str) -> Path | None:
 
 
 def _load_csv() -> pd.DataFrame | None:
+    global CSV_PATH
+    # Re-resolve if current path no longer exists (e.g. file deleted)
+    if not CSV_PATH.exists():
+        CSV_PATH = _resolve_csv_path()
     if not CSV_PATH.exists():
         return None
     suffix = CSV_PATH.suffix.lower()
@@ -156,12 +197,18 @@ def pdf_page(po: str, page: int = 1, dpi: int = 150):
 
 @app.post("/api/upload-csv")
 async def upload_csv(file: UploadFile = File(...)):
-    """Upload a CSV or Excel file (saved as retail.csv / retail.xlsx)."""
+    """Upload a CSV or Excel file. Saved in the project root and path
+    persisted to uploads/.csv_path so it survives server restarts."""
     global CSV_PATH
     content = await file.read()
-    dest = Path(file.filename)
+    dest = Path(file.filename).resolve()   # absolute path — survives CWD changes
     dest.write_bytes(content)
     CSV_PATH = dest
+    # Persist so _resolve_csv_path() finds it after a server restart
+    try:
+        _CSV_PATH_FILE.write_text(str(dest), encoding="utf-8")
+    except Exception:
+        pass
 
     # Return a quick summary so the UI can confirm the file loaded correctly.
     df = _load_csv()

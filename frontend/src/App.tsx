@@ -107,16 +107,19 @@ export default function App() {
       const info = await api.uploadCsv(file)
       setCsvInfo({ filename: info.filename, rows: info.rows })
 
-      // Refresh the CSV preview for the currently selected PO.
-      // If no PO is selected yet, the preview will populate once a PDF is uploaded.
-      if (selectedPo) {
-        const csv = await api.getCsvRows(selectedPo).catch(() => null)
+      // Use extraction's po_number when available — it is the authoritative PO
+      // that matches CSV rows, even if selectedPo is still a filename-based key.
+      const lookupPo =
+        (extraction as Record<string, unknown> | null)?.po_number as string | null
+        ?? selectedPo
+      if (lookupPo) {
+        const csv = await api.getCsvRows(lookupPo).catch(() => null)
         setCsvData(csv)
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'CSV upload failed')
     }
-  }, [selectedPo])
+  }, [selectedPo, extraction])
 
   const handleExtract = useCallback(async (force = false) => {
     if (!selectedPo) return
@@ -127,14 +130,12 @@ export default function App() {
       setExtraction(result)
       setComparison(null)
 
-      // If the extracted po_number differs from selectedPo (shouldn't happen
-      // now that upload renames the file, but kept as a safety refresh), update
-      // the CSV preview so it shows rows for the correct PO.
+      // Always refresh CSV after extraction so data shows even if the initial
+      // getCsvRows (before any CSV was uploaded) returned empty.
       const extractedPo = (result as Record<string, unknown>).po_number as string | null
-      if (extractedPo && extractedPo !== selectedPo) {
-        const csv = await api.getCsvRows(extractedPo).catch(() => null)
-        setCsvData(csv)
-      }
+      const lookupPo = extractedPo || selectedPo
+      const csv = await api.getCsvRows(lookupPo).catch(() => null)
+      setCsvData(csv)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Extraction failed')
     } finally {
