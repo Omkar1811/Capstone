@@ -67,7 +67,7 @@ from dotenv import load_dotenv
 # Loaders must be imported AFTER load_dotenv so env vars are available
 load_dotenv()
 
-# ── Loader selection (env var or --loader CLI flag set before import) ─────────
+# ── Loader selection (env var or --loader CLI flag set before import) ─────────────
 # INVOICE_LOADER=pdf   → pdfplumber + PyMuPDF  (default, no cloud creds needed)
 # INVOICE_LOADER=azure → Azure Document Intelligence + PyMuPDF
 _LOADER_CHOICE = os.getenv("INVOICE_LOADER", "pdf").lower()
@@ -130,6 +130,10 @@ _VISION_EXTRACT_FUNC = textwrap.dedent(
         Per-page invoice line-item extraction via OpenAI gpt-4o-mini vision API.
         Runs inside DocETL's custom parsing tool framework during data loading.
         Combines image (PyMuPDF-rendered PNG) + aligned text (pdfplumber) for best results.
+
+        DocETL parsing tools REPLACE the source document with the returned list of dicts,
+        so every return value must spread the original document fields (_doc_base) to
+        preserve page_num, total_pages, pdf_name etc. for downstream map operations.
         """
         import os, json, re
 
@@ -152,11 +156,11 @@ _VISION_EXTRACT_FUNC = textwrap.dedent(
             depth = 0
             start = -1
             for i, ch in enumerate(text):
-                if ch == '{':
+                if ch == \'{\':
                     if depth == 0:
                         start = i
                     depth += 1
-                elif ch == '}':
+                elif ch == \'}\':
                     depth -= 1
                     if depth == 0 and start != -1:
                         try:
@@ -169,14 +173,19 @@ _VISION_EXTRACT_FUNC = textwrap.dedent(
             return {"items": items}
 
         api_key = os.environ.get("OPENAI_API_KEY", "")
+        # Capture all original document fields except image_b64 (too large to carry forward).
+        # DocETL parsing tools replace the source document with the returned dicts, so
+        # _doc_base must be spread into every return value to preserve page_num etc.
+        _doc_base = {k: v for k, v in document.items() if k != "image_b64"}
+
         if not api_key:
-            return [{"extracted_items": [], "extraction_error": "No OPENAI_API_KEY set"}]
+            return [{**_doc_base, "extracted_items": [], "extraction_error": "No OPENAI_API_KEY set"}]
 
         try:
             from openai import OpenAI
             client = OpenAI(api_key=api_key)
         except Exception as e:
-            return [{"extracted_items": [], "extraction_error": f"OpenAI init: {e}"}]
+            return [{**_doc_base, "extracted_items": [], "extraction_error": f"OpenAI init: {e}"}]
 
         aligned_text = document.get("aligned_text", "")
         image_b64    = document.get("image_b64")
@@ -193,7 +202,7 @@ _VISION_EXTRACT_FUNC = textwrap.dedent(
             "SKIP: column headers, subtotal/total/tax/freight rows, section labels, blank rows\\n\\n"
             "QUANTITY RULES — critical for invoices with multiple qty columns:\\n"
             "  trns_qty = the SHIPPED/INVOICED quantity in THIS invoice document.\\n"
-            "    If the table has separate columns like 'QTY ORD' and 'SHIP QTY' or 'INV QTY',\\n"
+            "    If the table has separate columns like \'QTY ORD\' and \'SHIP QTY\' or \'INV QTY\',\\n"
             "    use the SHIP/INV column, NOT the ORD column.\\n"
             "  If an item shows 0 shipped (backordered), set trns_qty=0 and extended_price=0.\\n"
             "  order_qty = the originally ordered quantity (may differ from trns_qty).\\n\\n"
@@ -205,12 +214,12 @@ _VISION_EXTRACT_FUNC = textwrap.dedent(
             "    may include hyphens. Examples: SM-923, E2350H, 88861744-41, 100-0288, GG-123\\n"
             "    It may also appear as a sub-row below the main product row.\\n"
             "  item: buyer PO item code — SHORT (4-8 digit) NUMERIC code ONLY (no letters).\\n"
-            "    Often appears on a sub-row labeled 'Tracking number' (this is the buyer's internal\\n"
+            "    Often appears on a sub-row labeled \'Tracking number\' (this is the buyer\'s internal\\n"
             "    reference, NOT the carrier tracking). Examples: 019779, 023199, 029044\\n"
-            "    RULE: if a line says '[6-digit-number] Tracking number', the 6-digit number is item.\\n"
+            "    RULE: if a line says \'[6-digit-number] Tracking number\', the 6-digit number is item.\\n"
             "  line_number: sequential row counter (1, 2, 3...) from leftmost No./Line column\\n"
             "  tracking_number: CARRIER tracking — the number AFTER the carrier name.\\n"
-            "    Examples: 'FedEx (US) 460974016150', 'UPS 1Z...', 'DHL ...'\\n"
+            "    Examples: \'FedEx (US) 460974016150\', \'UPS 1Z...\', \'DHL ...\'\\n"
             "    RULE: tracking_number ALWAYS starts with carrier name (FedEx/UPS/DHL etc.)\\n"
             "  batch_number: batch/lot code (alphanumeric, e.g. D5B2604FY, A2D0463Y)\\n\\n"
             "LAYOUT RULES:\\n"
@@ -269,19 +278,19 @@ _VISION_EXTRACT_FUNC = textwrap.dedent(
                 items2 = (_recover_partial_json(raw2).get("items") or [])
                 raw = raw2 if len(items2) >= len(items1) else raw
         except Exception as exc:
-            return [{"extracted_items": [], "extraction_error": str(exc)}]
+            return [{**_doc_base, "extracted_items": [], "extraction_error": str(exc)}]
 
         try:
             data = _recover_partial_json(raw)
         except Exception as exc:
-            return [{"extracted_items": [], "extraction_error": f"JSON parse: {exc}"}]
+            return [{**_doc_base, "extracted_items": [], "extraction_error": f"JSON parse: {exc}"}]
 
         items = data.get("items", data.get("line_items", []))
         valid_items = [
             it for it in items
             if isinstance(it, dict) and abs(_safe_float(it.get("unit_price"))) > 0
         ]
-        return [{"extracted_items": valid_items, "extraction_error": None}]
+        return [{**_doc_base, "extracted_items": valid_items, "extraction_error": None}]
     '''
 ).strip()
 
@@ -325,16 +334,27 @@ def _build_validate_prompt() -> str:
 
 
 def _build_validate_gleaning_prompt() -> str:
+    """Gleaning validation prompt for the validate_and_correct map operation.
+
+    DocETL's gleaning system calls this prompt to judge whether the LLM output
+    needs another refinement round.  The response MUST be JSON with:
+      - needs_improvement (bool): true if another round should run
+      - feedback (str): what specifically needs fixing (empty string if none)
+    The current output is available as {{ output.validated_items }}.
+    """
     return (
-        "Review the validated_items:\n"
-        "1. Math: extended_price = trns_qty x unit_price (±1%)?\n"
-        "2. Field types correct?\n"
-        "   - reference_number: 12-14 digit barcode (should NOT start with carrier names)\n"
-        "   - vend_cat_no: alphanumeric WITH letters (e.g. SM-923, not just digits)\n"
+        "Review the validated_items produced by the previous extraction step:\n"
+        "{{ output.validated_items | tojson }}\n\n"
+        "Check for these issues:\n"
+        "1. MATH: Is extended_price = trns_qty × unit_price (within ±1%) for every item?\n"
+        "2. FIELD TYPES:\n"
+        "   - reference_number: 12-14 digit numeric barcode (must NOT start with a carrier name)\n"
+        "   - vend_cat_no: alphanumeric WITH letters (e.g. SM-923, not purely numeric)\n"
         "   - item: 4-8 digit numeric ONLY (no letters)\n"
         "   - tracking_number: starts with carrier name (FedEx/UPS/DHL)\n"
-        "3. No null sentinel strings ('None', 'null') remaining?\n"
-        "Fix any remaining issues and return corrected validated_items."
+        "3. NULL SENTINELS: Any 'None', 'null', 'N/A' strings that should be JSON null?\n\n"
+        "Return JSON: {\"needs_improvement\": true or false, "
+        "\"feedback\": \"describe each issue to fix, or empty string if everything is correct\"}"
     )
 
 
@@ -669,7 +689,7 @@ def process_pdf(
     print(f"  PDF: {pdf_name}")
     print(f"{'=' * 64}")
 
-    # ── Phase 1: PDF loading ─────────────────────────────────────────────────
+    # ── Phase 1: PDF loading ────────────────────────────────────────────────
     print(f"  [1/3] Loading PDF ({_LOADER_NAME}) ...")
     pages = load_pdf_pages(str(pdf_path_obj))
     if not pages:
@@ -682,7 +702,7 @@ def process_pdf(
     print(f"        PO Number : {po_number or '(not found)'}")
     print(f"        Subtotal  : {subtotal} (regex)")
 
-    # ── Phase 2: DocETL pipeline ─────────────────────────────────────────────
+    # ── Phase 2: DocETL pipeline ──────────────────────────────────────────
     print(f"  [2/3] Running DocETL pipeline ({len(pages)} pages) ...")
 
     # Build input records (one per page)
@@ -712,7 +732,7 @@ def process_pdf(
     if page_results is None:
         return {"error": "DocETL pipeline failed", "pdf": pdf_name, "po_number": po_number}
 
-    # ── Phase 3: Aggregate + verify ──────────────────────────────────────────
+    # ── Phase 3: Aggregate + verify ────────────────────────────────────────────
     print(f"  [3/3] Aggregating {len(page_results)} page results ...")
     items = aggregate_pages(page_results)
     item_sum = sum(_safe_float(it.get("extended_price")) for it in items)
@@ -851,7 +871,7 @@ def main() -> None:
             traceback.print_exc()
             results.append({"error": str(exc), "pdf": Path(pdf).name})
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # ── Summary ──────────────────────────────────────────────────────────────────
     print(f"\n{'=' * 64}")
     print("SUMMARY")
     print(f"{'=' * 64}")
