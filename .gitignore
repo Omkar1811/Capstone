@@ -19,7 +19,9 @@ env/
 uploads/
 results/
 results_mapped/
+results_docetl/
 compare/
+docetl_workspace/
 
 # Frontend
 frontend/node_modules/
