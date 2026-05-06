@@ -4,7 +4,7 @@ azure_di_loader.py - Azure Document Intelligence loader for invoice extraction.
 
 Drop-in replacement for pdf_loader.py that uses Azure Document Intelligence
 (prebuilt-layout model) for text and structure extraction.  Returns the SAME
-page-dict schema so docetl.py can switch loaders transparently via the
+page-dict schema so invoice_docetl.py can switch loaders transparently via the
 INVOICE_LOADER environment variable.
 
 Azure DI enhancements over pdfplumber

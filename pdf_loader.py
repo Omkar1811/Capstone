@@ -12,7 +12,7 @@ Responsibilities
 - Extract the PO number from the first two pages of the invoice.
 
 This module is intentionally free of DocETL / pipeline concerns.
-It is imported by docetl.py which orchestrates the full pipeline.
+It is imported by invoice_docetl.py which orchestrates the DocETL pipeline.
 """
 
 import base64
